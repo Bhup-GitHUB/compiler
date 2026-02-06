@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import re
 from dataclasses import dataclass
 
@@ -8,7 +10,7 @@ from token_types import TokenType
 
 @dataclass(frozen=True)
 class _Rule:
-    pattern: re.Pattern[str]
+    pattern: re.Pattern
     token_type: TokenType | None
 
 
