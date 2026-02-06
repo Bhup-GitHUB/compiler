@@ -15,6 +15,8 @@ class _Rule:
 
 
 class Lexer:
+    _INVALID_MIXED_NUMBER = re.compile(r"\d+[A-Za-z_][A-Za-z0-9_]*")
+
     def __init__(self, source: str, file_name: str = "<memory>") -> None:
         self.source = source
         self.file_name = file_name
@@ -34,6 +36,8 @@ class Lexer:
 
     def _next_token(self) -> Token | None:
         remaining = self.source[self.position :]
+        self._check_unterminated_block_comment(remaining)
+        self._check_invalid_mixed_number(remaining)
         for rule in self._rules:
             match = rule.pattern.match(remaining)
             if match is None:
@@ -75,9 +79,23 @@ class Lexer:
             _Rule(re.compile(r"\)"), TokenType.RPAREN),
             _Rule(re.compile(r";"), TokenType.SEMICOLON),
             _Rule(re.compile(r","), TokenType.COMMA),
+            _Rule(re.compile(r"\d+'[bBdDhH][0-9a-fA-FxXzZ_]+"), TokenType.NUMBER),
             _Rule(re.compile(r"\d+"), TokenType.NUMBER),
             _Rule(re.compile(r"[A-Za-z_][A-Za-z0-9_]*"), TokenType.IDENTIFIER),
         ]
+
+    def _check_unterminated_block_comment(self, remaining: str) -> None:
+        if not remaining.startswith("/*"):
+            return
+        if "*/" in remaining:
+            return
+        self._raise_error("unterminated block comment", self.line, self.column)
+
+    def _check_invalid_mixed_number(self, remaining: str) -> None:
+        match = self._INVALID_MIXED_NUMBER.match(remaining)
+        if match is None:
+            return
+        self._raise_error(f"invalid number literal '{match.group(0)}'", self.line, self.column)
 
     def _advance(self, text: str) -> None:
         self.position += len(text)
