@@ -155,3 +155,10 @@ def test_line_and_column_tracking() -> None:
     assert assign_token.column == 1
     assert endmodule_token.line == 3
     assert endmodule_token.column == 1
+
+
+def test_deterministic_token_stream() -> None:
+    source = "module m(input a, output y); assign y = a | ~a; endmodule"
+    one = Lexer(source, "t.v").tokenize()
+    two = Lexer(source, "t.v").tokenize()
+    assert one == two
