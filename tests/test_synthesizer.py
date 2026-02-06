@@ -1,3 +1,5 @@
+import pytest
+
 from lexer import Lexer
 from netlist import emit_verilog
 from parser import Parser
@@ -50,3 +52,17 @@ def test_emit_verilog_output() -> None:
     assert "module m_netlist(a, b, y);" in text
     assert "and gate_1(y, a, b);" in text
     assert text.endswith("endmodule\n")
+
+
+def test_strict_mode_fails_on_undeclared_signal() -> None:
+    source = "module m(input a, output y); assign y = a & b; endmodule"
+    from errors import SynthesisError
+    with pytest.raises(SynthesisError):
+        _synthesize(source, strict=True)
+
+
+def test_deterministic_output() -> None:
+    source = "module m(input a, b, output y); assign y = a ^ b; endmodule"
+    one = emit_verilog(_synthesize(source))
+    two = emit_verilog(_synthesize(source))
+    assert one == two
