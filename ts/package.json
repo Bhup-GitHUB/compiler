@@ -1,0 +1,11 @@
+{
+  "name": "verilog-compiler-ts",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "bun run src/main.ts",
+    "dev": "bun run --watch src/main.ts",
+    "test": "bun test"
+  }
+}
