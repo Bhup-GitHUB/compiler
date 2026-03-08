@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
 
 import { createLexer } from "../src/lexer";
 import { TokenType } from "../src/token-types";
@@ -60,7 +61,7 @@ describe("lexer", () => {
     });
   });
 
-  test("tokenizes inline ports", () => {
+  test("tokenizes port list", () => {
     const tokens = tokenize("module m(input a, b, output y);");
 
     expect(tokens.map((token) => token.type)).toEqual([
@@ -80,7 +81,7 @@ describe("lexer", () => {
     ]);
   });
 
-  test("tokenizes assign expression operators", () => {
+  test("tokenizes assign expression", () => {
     const tokens = tokenize("assign y = a & b | ~c ^ d;");
 
     expect(tokens.map((token) => token.type)).toEqual([
@@ -175,10 +176,20 @@ describe("lexer", () => {
     );
   });
 
-  test("raises on invalid mixed numbers", () => {
+  test("raises on invalid numbers", () => {
     expect(() => tokenize("assign y = 123abc;", "err.v")).toThrow(
       "err.v:1:12: invalid number literal '123abc'",
     );
+  });
+
+  test("tokenizes fixture file", () => {
+    const source = readFileSync("tests/fixtures/test_basic.v", "utf-8");
+    const tokens = tokenize(source, "tests/fixtures/test_basic.v");
+
+    expect(tokens[0].type).toBe(TokenType.MODULE);
+    expect(tokens.some((token) => token.type === TokenType.WIRE)).toBe(true);
+    expect(tokens.some((token) => token.type === TokenType.ASSIGN)).toBe(true);
+    expect(tokens.at(-1)?.type).toBe(TokenType.EOF);
   });
 
   test("tracks line and column across lines", () => {
