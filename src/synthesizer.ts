@@ -1,4 +1,14 @@
-import type { BinaryExpr, Expr, IdentifierExpr, ModuleNode, NumberExpr, UnaryExpr } from "./ast";
+import type {
+  BinaryExpr,
+  CompilationUnit,
+  Expr,
+  IdentifierExpr,
+  ModuleNode,
+  NumberExpr,
+  SourceSpan,
+  UnaryExpr,
+} from "./ast";
+import { logDebug } from "./debug";
 import { createSynthesisError, formatCompilerError } from "./errors";
 import type { NetlistAssign, NetlistGate, NetlistModule } from "./netlist";
 
@@ -27,6 +37,40 @@ const BINARY_GATE_TYPE: Record<string, string> = {
   "||": "or",
   "^": "xor",
 };
+
+export function synthesizeCompilationUnit(
+  unit: CompilationUnit,
+  options: SynthesizeOptions = {},
+): NetlistModule[] {
+  const seenModules = new Map<string, ModuleNode>();
+  const netlists: NetlistModule[] = [];
+
+  for (const moduleNode of unit.modules) {
+    const existing = seenModules.get(moduleNode.name);
+
+    if (existing) {
+      const notes = [
+        `previous definition: ${existing.fileName}:${existing.nameSpan.start.line}:${existing.nameSpan.start.column}`,
+      ];
+      throw new Error(
+        formatCompilerError(
+          createSynthesisError(
+            `duplicate module definition '${moduleNode.name}'`,
+            moduleNode.fileName,
+            moduleNode.nameSpan.start.line,
+            moduleNode.nameSpan.start.column,
+            notes,
+          ),
+        ),
+      );
+    }
+
+    seenModules.set(moduleNode.name, moduleNode);
+    netlists.push(synthesize(moduleNode, options));
+  }
+
+  return netlists;
+}
 
 export function synthesize(
   moduleNode: ModuleNode,
@@ -61,13 +105,13 @@ export function synthesize(
 
   for (const gate of moduleNode.gates) {
     if (state.usedGateNames.has(gate.name)) {
-      raiseSynthesisError(state, `duplicate gate name '${gate.name}'`);
+      raiseSynthesisError(state, gate.nameSpan, `duplicate gate name '${gate.name}'`);
     }
 
     state.usedGateNames.add(gate.name);
 
-    for (const signal of gate.connections) {
-      validateSignal(state, signal);
+    for (const connection of gate.connectionRefs) {
+      validateSignal(state, connection.value, connection.span);
     }
 
     state.gates.push({
@@ -80,12 +124,12 @@ export function synthesize(
   for (const assign of moduleNode.assigns) {
     if (!state.declaredSignals.has(assign.target)) {
       if (state.strict) {
-        raiseSynthesisError(state, `undeclared target '${assign.target}'`);
+        raiseSynthesisError(state, assign.targetSpan, `undeclared target '${assign.target}'`);
       }
 
       state.declaredSignals.add(assign.target);
       declaredWires.push(assign.target);
-      logDebug(state, "auto declared target wire", assign.target);
+      logDebug(state, "synth", "auto-target-wire", { target: assign.target });
     }
 
     const source = emitExpr(state, assign.expr, assign.target);
@@ -100,12 +144,9 @@ export function synthesize(
 
   const ports = dedupe(moduleNode.ports.flatMap((port) => port.names));
   const wires = dedupe([...declaredWires, ...state.generatedWires]);
-  const netlistName = `${moduleNode.name}_netlist`;
-
-  logDebug(state, "final netlist name", netlistName);
 
   return {
-    name: netlistName,
+    name: `${moduleNode.name}_netlist`,
     ports,
     inputs,
     outputs,
@@ -132,7 +173,7 @@ function emitExpr(state: SynthesisState, expr: Expr, target: string | null): str
 }
 
 function emitIdentifierExpr(state: SynthesisState, expr: IdentifierExpr): string {
-  validateSignal(state, expr.name);
+  validateSignal(state, expr.name, expr.span);
   return expr.name;
 }
 
@@ -151,7 +192,12 @@ function emitUnaryExpr(state: SynthesisState, expr: UnaryExpr, target: string | 
     connections: [out, operand],
   });
 
-  logDebug(state, "created gate", { gateType: "not", gateName, out, operand });
+  logDebug(state, "synth", "gate", {
+    gateName,
+    gateType: "not",
+    out,
+    operand,
+  });
 
   return out;
 }
@@ -160,7 +206,7 @@ function emitBinaryExpr(state: SynthesisState, expr: BinaryExpr, target: string 
   const gateType = BINARY_GATE_TYPE[expr.op];
 
   if (!gateType) {
-    raiseSynthesisError(state, `unsupported operator '${expr.op}'`);
+    raiseSynthesisError(state, expr.span, `unsupported operator '${expr.op}'`);
   }
 
   const left = emitExpr(state, expr.left, null);
@@ -174,7 +220,13 @@ function emitBinaryExpr(state: SynthesisState, expr: BinaryExpr, target: string 
     connections: [out, left, right],
   });
 
-  logDebug(state, "created gate", { gateType, gateName, out, left, right });
+  logDebug(state, "synth", "gate", {
+    gateName,
+    gateType,
+    out,
+    left,
+    right,
+  });
 
   return out;
 }
@@ -187,7 +239,7 @@ function resolveOut(state: SynthesisState, target: string | null): string {
   const name = nextTempWire(state);
   state.generatedWires.push(name);
   state.declaredSignals.add(name);
-  logDebug(state, "created temp wire", name);
+  logDebug(state, "synth", "temp-wire", { name });
   return name;
 }
 
@@ -214,26 +266,32 @@ function nextGateName(state: SynthesisState): string {
   }
 }
 
-function validateSignal(state: SynthesisState, signal: string): void {
+function validateSignal(state: SynthesisState, signal: string, span: SourceSpan): void {
   if (state.declaredSignals.has(signal) || isNumberLiteral(signal)) {
     return;
   }
 
   if (state.strict) {
-    raiseSynthesisError(state, `undeclared signal '${signal}'`);
+    raiseSynthesisError(state, span, `undeclared signal '${signal}'`);
   }
 
   state.declaredSignals.add(signal);
   state.generatedWires.push(signal);
-  logDebug(state, "auto declared source wire", signal);
+  logDebug(state, "synth", "auto-source-wire", { signal });
 }
 
 function isNumberLiteral(value: string): boolean {
   return /^\d+$/.test(value) || /^\d+'[bBdDhH][0-9a-fA-FxXzZ_]+$/.test(value);
 }
 
-function raiseSynthesisError(state: SynthesisState, message: string): never {
-  const error = createSynthesisError(message, state.moduleNode.name, 1, 1);
+function raiseSynthesisError(state: SynthesisState, span: SourceSpan, message: string): never {
+  const error = createSynthesisError(
+    message,
+    span.start.fileName,
+    span.start.line,
+    span.start.column,
+    [`module: ${state.moduleNode.name}`],
+  );
   throw new Error(formatCompilerError(error));
 }
 
@@ -251,12 +309,4 @@ function dedupe(values: string[]): string[] {
   }
 
   return result;
-}
-
-function logDebug(state: SynthesisState, label: string, value: unknown): void {
-  if (!state.debug) {
-    return;
-  }
-
-  console.log(label, value);
 }

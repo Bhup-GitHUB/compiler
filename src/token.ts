@@ -1,3 +1,4 @@
+import type { SourceSpan } from "./ast";
 import type { TokenType } from "./token-types";
 
 export type Token = {
@@ -6,4 +7,5 @@ export type Token = {
   line: number;
   column: number;
   fileName: string;
+  span: SourceSpan;
 };

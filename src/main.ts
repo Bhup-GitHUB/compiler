@@ -1,10 +1,7 @@
-import { readFileSync, writeFileSync } from "node:fs";
+import { writeFileSync } from "node:fs";
 
-import { formatCompilerError } from "./errors";
-import { createLexer } from "./lexer";
-import { emitVerilog } from "./netlist";
-import { createParser } from "./parser";
-import { synthesize } from "./synthesizer";
+import { compileFile } from "./compiler";
+import { logDebug } from "./debug";
 
 type CliArgs = {
   inputPath: string;
@@ -12,52 +9,47 @@ type CliArgs = {
   dumpTokens: boolean;
   dumpAst: boolean;
   strict: boolean;
+  debug: boolean;
 };
 
 function main(): number {
   try {
     const args = parseArgs(process.argv.slice(2));
+    console.log(`reading ${args.inputPath}`);
+    console.log("running compiler pipeline");
+    logDebug(args, "cli", "compile-start", {
+      inputPath: args.inputPath,
+      outputPath: args.outputPath,
+      strict: args.strict,
+    });
 
-    console.log("reading file", args.inputPath);
-    const source = readFileSync(args.inputPath, "utf-8");
-
-    console.log("starting lexer");
-    const tokens = createLexer(source, args.inputPath).tokenize();
+    const result = compileFile(args.inputPath, {
+      strict: args.strict,
+      debug: args.debug,
+    });
 
     if (args.dumpTokens) {
-      for (const token of tokens) {
+      for (const token of result.tokens) {
         console.log(token);
       }
     }
 
-    console.log("starting parser");
-    const moduleNode = createParser(tokens).parse();
-
     if (args.dumpAst) {
-      console.log(JSON.stringify(moduleNode, null, 2));
+      console.log(JSON.stringify(result.unit, null, 2));
     }
 
-    console.log("starting synthesizer");
-    const netlist = synthesize(moduleNode, { strict: args.strict });
-
-    console.log("emitting verilog");
-    const output = emitVerilog(netlist);
-
     if (args.outputPath) {
-      console.log("writing output file", args.outputPath);
-      writeFileSync(args.outputPath, output, "utf-8");
+      console.log(`writing ${args.outputPath}`);
+      writeFileSync(args.outputPath, result.output, "utf-8");
+      logDebug(args, "cli", "write-output", { outputPath: args.outputPath });
     } else {
-      process.stdout.write(output);
+      console.log("emitting netlist to stdout");
+      process.stdout.write(result.output);
     }
 
     return 0;
   } catch (error) {
     if (error instanceof Error) {
-      if (looksLikeCompilerError(error.message)) {
-        console.error(error.message);
-        return 1;
-      }
-
       console.error(error.message);
       return 1;
     }
@@ -73,6 +65,7 @@ function parseArgs(args: string[]): CliArgs {
   let dumpTokens = false;
   let dumpAst = false;
   let strict = false;
+  let debug = false;
 
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
@@ -89,6 +82,11 @@ function parseArgs(args: string[]): CliArgs {
 
     if (arg === "--strict") {
       strict = true;
+      continue;
+    }
+
+    if (arg === "--debug") {
+      debug = true;
       continue;
     }
 
@@ -116,17 +114,18 @@ function parseArgs(args: string[]): CliArgs {
     throw new Error("missing input file path");
   }
 
+  if (dumpTokens || dumpAst) {
+    debug = true;
+  }
+
   return {
     inputPath,
     outputPath,
     dumpTokens,
     dumpAst,
     strict,
+    debug,
   };
-}
-
-function looksLikeCompilerError(message: string): boolean {
-  return /^[^:\n]+:\d+:\d+: /.test(message);
 }
 
 process.exit(main());

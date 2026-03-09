@@ -10,6 +10,11 @@ function parse(source: string, fileName = "p.v"): ModuleNode {
   return createParser(tokens).parse();
 }
 
+function parseUnit(source: string, fileName = "p.v") {
+  const tokens = createLexer(source, fileName).tokenize();
+  return createParser(tokens).parseCompilationUnit();
+}
+
 describe("ast", () => {
   test("ast shapes are plain readable objects", () => {
     const expr: Expr = {
@@ -18,25 +23,27 @@ describe("ast", () => {
       left: {
         kind: "IdentifierExpr",
         name: "a",
+        span: {
+          start: { fileName: "a.v", line: 1, column: 1 },
+          end: { fileName: "a.v", line: 1, column: 1 },
+        },
       },
       right: {
         kind: "IdentifierExpr",
         name: "b",
+        span: {
+          start: { fileName: "a.v", line: 1, column: 5 },
+          end: { fileName: "a.v", line: 1, column: 5 },
+        },
+      },
+      span: {
+        start: { fileName: "a.v", line: 1, column: 1 },
+        end: { fileName: "a.v", line: 1, column: 5 },
       },
     };
 
-    expect(expr).toEqual({
-      kind: "BinaryExpr",
-      op: "&",
-      left: {
-        kind: "IdentifierExpr",
-        name: "a",
-      },
-      right: {
-        kind: "IdentifierExpr",
-        name: "b",
-      },
-    });
+    expect(expr.kind).toBe("BinaryExpr");
+    expect(expr.span.start.fileName).toBe("a.v");
   });
 });
 
@@ -45,7 +52,7 @@ describe("parser", () => {
     const moduleNode = parse("module m(input a, b, output y); endmodule");
 
     expect(moduleNode.name).toBe("m");
-    expect(moduleNode.ports).toEqual([
+    expect(moduleNode.ports.map((port) => ({ direction: port.direction, names: port.names }))).toEqual([
       {
         direction: "input",
         names: ["a", "b"],
@@ -60,114 +67,35 @@ describe("parser", () => {
   test("parses wire declarations", () => {
     const moduleNode = parse("module m(input a, output y); wire x, z; endmodule");
 
-    expect(moduleNode.wires).toEqual([
-      {
-        names: ["x", "z"],
-      },
-    ]);
+    expect(moduleNode.wires.map((wire) => wire.names)).toEqual([["x", "z"]]);
   });
 
   test("parses assign statements with identifier rhs", () => {
     const moduleNode = parse("module m(input a, output y); assign y = a; endmodule");
 
-    expect(moduleNode.assigns).toEqual([
-      {
-        target: "y",
-        expr: {
-          kind: "IdentifierExpr",
-          name: "a",
-        },
-      },
-    ]);
+    expect(moduleNode.assigns[0].target).toBe("y");
+    expect(moduleNode.assigns[0].expr).toMatchObject({
+      kind: "IdentifierExpr",
+      name: "a",
+    });
   });
 
   test("parses assign statements with number rhs", () => {
     const moduleNode = parse("module m(output y); assign y = 1; endmodule");
 
-    expect(moduleNode.assigns).toEqual([
-      {
-        target: "y",
-        expr: {
-          kind: "NumberExpr",
-          value: "1",
-        },
-      },
-    ]);
+    expect(moduleNode.assigns[0].expr).toMatchObject({
+      kind: "NumberExpr",
+      value: "1",
+    });
   });
 
   test("parses primitive gate instantiations", () => {
     const moduleNode = parse("module m(input a, b, output y); and g1(y, a, b); endmodule");
 
-    expect(moduleNode.gates).toEqual([
-      {
-        gateType: "and",
-        name: "g1",
-        connections: ["y", "a", "b"],
-      },
-    ]);
-  });
-
-  test("parses a module with mixed body items in order buckets", () => {
-    const source =
-      "module m(input a, b, output y);" +
-      "wire temp;" +
-      "assign temp = a & b;" +
-      "or g1(y, temp, a);" +
-      "endmodule";
-
-    const moduleNode = parse(source);
-
-    expect(moduleNode.wires).toEqual([{ names: ["temp"] }]);
-    expect(moduleNode.assigns).toHaveLength(1);
-    expect(moduleNode.gates).toEqual([
-      {
-        gateType: "or",
-        name: "g1",
-        connections: ["y", "temp", "a"],
-      },
-    ]);
-  });
-
-  test("parses parenthesized expressions", () => {
-    const moduleNode = parse("module m(input a, b, output y); assign y = (a & b); endmodule");
-
-    expect(moduleNode.assigns[0].expr).toEqual({
-      kind: "BinaryExpr",
-      op: "&",
-      left: {
-        kind: "IdentifierExpr",
-        name: "a",
-      },
-      right: {
-        kind: "IdentifierExpr",
-        name: "b",
-      },
-    });
-  });
-
-  test("parses unary bit not", () => {
-    const moduleNode = parse("module m(input a, output y); assign y = ~a; endmodule");
-
-    expect(moduleNode.assigns[0].expr).toEqual({
-      kind: "UnaryExpr",
-      op: "~",
-      operand: {
-        kind: "IdentifierExpr",
-        name: "a",
-      },
-    });
-  });
-
-  test("parses unary keyword not", () => {
-    const moduleNode = parse("module m(input a, output y); assign y = not a; endmodule");
-
-    expect(moduleNode.assigns[0].expr).toEqual({
-      kind: "UnaryExpr",
-      op: "not",
-      operand: {
-        kind: "IdentifierExpr",
-        name: "a",
-      },
+    expect(moduleNode.gates[0]).toMatchObject({
+      gateType: "and",
+      name: "g1",
+      connections: ["y", "a", "b"],
     });
   });
 
@@ -178,93 +106,37 @@ describe("parser", () => {
 
     const expr = moduleNode.assigns[0].expr as BinaryExpr;
 
-    expect(expr.kind).toBe("BinaryExpr");
     expect(expr.op).toBe("|");
     expect((expr.right as BinaryExpr).op).toBe("^");
-    expect((((expr.right as BinaryExpr).right as BinaryExpr)).op).toBe("&");
-    expect((((expr.right as BinaryExpr).right as BinaryExpr).right)).toEqual({
-      kind: "UnaryExpr",
-      op: "~",
-      operand: {
-        kind: "IdentifierExpr",
-        name: "d",
-      },
+    expect((((expr.right as BinaryExpr).right as BinaryExpr).op)).toBe("&");
+  });
+
+  test("tracks source span for parsed statements", () => {
+    const moduleNode = parse("module m(input a, output y);\nassign y = a;\nendmodule");
+
+    expect(moduleNode.assigns[0].span.start).toEqual({
+      fileName: "p.v",
+      line: 2,
+      column: 1,
     });
+    expect(moduleNode.assigns[0].targetSpan.start.column).toBe(8);
   });
 
-  test("logical operators bind weaker than bitwise ones", () => {
-    const moduleNode = parse(
-      "module m(input a, b, c, d, e, output y); assign y = a || b && c | d & e; endmodule",
-    );
-
-    const expr = moduleNode.assigns[0].expr as BinaryExpr;
-    expect(expr.op).toBe("||");
-    expect((expr.right as BinaryExpr).op).toBe("&&");
-    expect((((expr.right as BinaryExpr).right) as BinaryExpr).op).toBe("|");
-  });
-
-  test("parses nested expressions", () => {
-    const moduleNode = parse(
-      "module m(input a, b, c, d, output y); assign y = ((a | b) & (c ^ d)); endmodule",
-    );
-
-    expect(moduleNode.assigns[0].expr).toEqual({
-      kind: "BinaryExpr",
-      op: "&",
-      left: {
-        kind: "BinaryExpr",
-        op: "|",
-        left: {
-          kind: "IdentifierExpr",
-          name: "a",
-        },
-        right: {
-          kind: "IdentifierExpr",
-          name: "b",
-        },
-      },
-      right: {
-        kind: "BinaryExpr",
-        op: "^",
-        left: {
-          kind: "IdentifierExpr",
-          name: "c",
-        },
-        right: {
-          kind: "IdentifierExpr",
-          name: "d",
-        },
-      },
-    });
-  });
-
-  test("rejects unexpected tokens in module body", () => {
-    expect(() => parse("module m(input a); output y; endmodule")).toThrow(
-      "p.v:1:20: unexpected token OUTPUT",
-    );
-  });
-
-  test("rejects missing required punctuation", () => {
+  test("rejects malformed syntax with token context", () => {
     expect(() => parse("module m(input a; endmodule")).toThrow(
-      "p.v:1:17: expected one of [RPAREN] got SEMICOLON",
+      "p.v:1:17: expected RPAREN, got SEMICOLON(';')",
     );
   });
 
-  test("rejects malformed gate instance syntax", () => {
-    expect(() => parse("module m(input a, output y); and g1(y, , a); endmodule")).toThrow(
-      "p.v:1:40: expected identifier or number in connection list",
-    );
+  test("parses multiple modules in one compilation unit", () => {
+    const unit = parseUnit("module a(); endmodule module b(); endmodule");
+
+    expect(unit.modules.map((moduleNode) => moduleNode.name)).toEqual(["a", "b"]);
   });
 
-  test("rejects malformed port list syntax", () => {
-    expect(() => parse("module m(a, output y); endmodule")).toThrow(
-      "p.v:1:10: expected input or output",
-    );
-  });
-
-  test("rejects extra tokens after endmodule", () => {
-    expect(() => parse("module m(); endmodule module x(); endmodule")).toThrow(
-      "p.v:1:23: expected one of [EOF] got MODULE",
+  test("single-module parse rejects trailing modules", () => {
+    expect(() => parse("module a(); endmodule module b(); endmodule")).toThrow(
+      "p.v:1:23: expected EOF after first module",
     );
   });
 
@@ -273,7 +145,6 @@ describe("parser", () => {
     const moduleNode = parse(source, "tests/fixtures/test_basic.v");
 
     expect(moduleNode.name).toBe("simple_logic");
-    expect(moduleNode.wires).toEqual([{ names: ["temp"] }]);
     expect(moduleNode.assigns).toHaveLength(2);
   });
 

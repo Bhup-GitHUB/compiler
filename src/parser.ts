@@ -1,6 +1,8 @@
 import type {
   AssignStmt,
   BinaryExpr,
+  CompilationUnit,
+  ConnectionRef,
   Expr,
   GateInstance,
   IdentifierExpr,
@@ -8,9 +10,11 @@ import type {
   NumberExpr,
   PortDecl,
   PortDirection,
+  SourceSpan,
   UnaryExpr,
   WireDecl,
 } from "./ast";
+import { logDebug } from "./debug";
 import { createParserError, formatCompilerError } from "./errors";
 import type { Token } from "./token";
 import { TokenType } from "./token-types";
@@ -24,6 +28,7 @@ type Parser = {
   index: number;
   debug: boolean;
   parse: () => ModuleNode;
+  parseCompilationUnit: () => CompilationUnit;
 };
 
 const GATE_TOKEN_TYPES = new Set<Token["type"]>([
@@ -43,15 +48,46 @@ export function createParser(
     tokens,
     index: 0,
     debug: options.debug === true,
-    parse: () => parseModule(parser),
+    parse: () => parseSingleModule(parser),
+    parseCompilationUnit: () => parseCompilationUnit(parser),
   };
 
   return parser;
 }
 
+function parseSingleModule(parser: Parser): ModuleNode {
+  const unit = parseCompilationUnit(parser);
+
+  if (unit.modules.length !== 1) {
+    const extra = unit.modules[1];
+    const error = createParserError(
+      "expected EOF after first module",
+      extra.fileName,
+      extra.span.start.line,
+      extra.span.start.column,
+      [`found module '${extra.name}'`],
+    );
+    throw new Error(formatCompilerError(error));
+  }
+
+  return unit.modules[0];
+}
+
+function parseCompilationUnit(parser: Parser): CompilationUnit {
+  const modules: ModuleNode[] = [];
+
+  while (current(parser).type !== TokenType.EOF) {
+    modules.push(parseModule(parser));
+  }
+
+  return {
+    modules,
+  };
+}
+
 function parseModule(parser: Parser): ModuleNode {
-  expect(parser, TokenType.MODULE);
-  const name = expect(parser, TokenType.IDENTIFIER).value;
+  const moduleToken = expect(parser, TokenType.MODULE);
+  const nameToken = expect(parser, TokenType.IDENTIFIER);
   expect(parser, TokenType.LPAREN);
   const ports = parsePorts(parser);
   expect(parser, TokenType.RPAREN);
@@ -62,7 +98,10 @@ function parseModule(parser: Parser): ModuleNode {
   const gates: GateInstance[] = [];
 
   while (current(parser).type !== TokenType.ENDMODULE) {
-    logDebug(parser, "parsing token", current(parser).type);
+    logDebug(parser, "parser", "body-token", {
+      type: current(parser).type,
+      value: current(parser).value,
+    });
 
     if (current(parser).type === TokenType.WIRE) {
       wires.push(parseWireDecl(parser));
@@ -79,18 +118,20 @@ function parseModule(parser: Parser): ModuleNode {
       continue;
     }
 
-    raiseParserError(parser, `unexpected token ${current(parser).type}`);
+    raiseParserError(parser, `unexpected token ${describeToken(current(parser))}`);
   }
 
-  expect(parser, TokenType.ENDMODULE);
-  expect(parser, TokenType.EOF);
+  const endmoduleToken = expect(parser, TokenType.ENDMODULE);
 
   return {
-    name,
+    name: nameToken.value,
     ports,
     wires,
     assigns,
     gates,
+    span: mergeSpans(moduleToken.span, endmoduleToken.span),
+    nameSpan: nameToken.span,
+    fileName: nameToken.fileName,
   };
 }
 
@@ -102,12 +143,15 @@ function parsePorts(parser: Parser): PortDecl[] {
   }
 
   while (true) {
+    const directionToken = current(parser);
     const direction = parseDirection(parser);
     const names = parseIdentifierGroup(parser);
+    const lastName = previous(parser);
 
     ports.push({
       direction,
       names,
+      span: mergeSpans(directionToken.span, lastName.span),
     });
 
     if (
@@ -135,7 +179,7 @@ function parseDirection(parser: Parser): PortDirection {
     return "output";
   }
 
-  raiseParserError(parser, "expected input or output");
+  raiseParserError(parser, `expected input or output, got ${describeToken(current(parser))}`);
 }
 
 function parseIdentifierGroup(parser: Parser): string[] {
@@ -153,68 +197,80 @@ function parseIdentifierGroup(parser: Parser): string[] {
 }
 
 function parseWireDecl(parser: Parser): WireDecl {
-  expect(parser, TokenType.WIRE);
+  const wireToken = expect(parser, TokenType.WIRE);
   const names = parseIdentifierGroup(parser);
-  expect(parser, TokenType.SEMICOLON);
+  const semicolonToken = expect(parser, TokenType.SEMICOLON);
 
   return {
     names,
+    span: mergeSpans(wireToken.span, semicolonToken.span),
   };
 }
 
 function parseAssign(parser: Parser): AssignStmt {
-  expect(parser, TokenType.ASSIGN);
-  const target = expect(parser, TokenType.IDENTIFIER).value;
+  const assignToken = expect(parser, TokenType.ASSIGN);
+  const targetToken = expect(parser, TokenType.IDENTIFIER);
   expect(parser, TokenType.EQUALS);
   const expr = parseLogicalOr(parser);
-  expect(parser, TokenType.SEMICOLON);
+  const semicolonToken = expect(parser, TokenType.SEMICOLON);
 
   return {
-    target,
+    target: targetToken.value,
     expr,
+    span: mergeSpans(assignToken.span, semicolonToken.span),
+    targetSpan: targetToken.span,
   };
 }
 
 function parseGateInstance(parser: Parser): GateInstance {
-  const gateType = expect(parser, ...Array.from(GATE_TOKEN_TYPES)).value;
-  const name = expect(parser, TokenType.IDENTIFIER).value;
+  const gateTypeToken = expect(parser, ...Array.from(GATE_TOKEN_TYPES));
+  const nameToken = expect(parser, TokenType.IDENTIFIER);
   expect(parser, TokenType.LPAREN);
-
-  const connections = [parseConnection(parser)];
+  const connectionRefs = [parseConnection(parser)];
 
   while (current(parser).type === TokenType.COMMA) {
     advance(parser);
-    connections.push(parseConnection(parser));
+    connectionRefs.push(parseConnection(parser));
   }
 
   expect(parser, TokenType.RPAREN);
-  expect(parser, TokenType.SEMICOLON);
+  const semicolonToken = expect(parser, TokenType.SEMICOLON);
 
   return {
-    gateType,
-    name,
-    connections,
+    gateType: gateTypeToken.value,
+    name: nameToken.value,
+    connections: connectionRefs.map((ref) => ref.value),
+    connectionRefs,
+    span: mergeSpans(gateTypeToken.span, semicolonToken.span),
+    nameSpan: nameToken.span,
   };
 }
 
-function parseConnection(parser: Parser): string {
+function parseConnection(parser: Parser): ConnectionRef {
   if (
     current(parser).type !== TokenType.IDENTIFIER &&
     current(parser).type !== TokenType.NUMBER
   ) {
-    raiseParserError(parser, "expected identifier or number in connection list");
+    raiseParserError(
+      parser,
+      `expected identifier or number in connection list, got ${describeToken(current(parser))}`,
+    );
   }
 
-  return advance(parser).value;
+  const token = advance(parser);
+  return {
+    value: token.value,
+    span: token.span,
+  };
 }
 
 function parseLogicalOr(parser: Parser): Expr {
   let expr = parseLogicalAnd(parser);
 
   while (current(parser).type === TokenType.LOGICAL_OR) {
-    const op = advance(parser).value;
+    const op = advance(parser);
     const right = parseLogicalAnd(parser);
-    expr = createBinaryExpr(op, expr, right);
+    expr = createBinaryExpr(op.value, expr, right, mergeSpans(expr.span, right.span));
   }
 
   return expr;
@@ -224,9 +280,9 @@ function parseLogicalAnd(parser: Parser): Expr {
   let expr = parseBitOr(parser);
 
   while (current(parser).type === TokenType.LOGICAL_AND) {
-    const op = advance(parser).value;
+    const op = advance(parser);
     const right = parseBitOr(parser);
-    expr = createBinaryExpr(op, expr, right);
+    expr = createBinaryExpr(op.value, expr, right, mergeSpans(expr.span, right.span));
   }
 
   return expr;
@@ -236,9 +292,9 @@ function parseBitOr(parser: Parser): Expr {
   let expr = parseBitXor(parser);
 
   while (current(parser).type === TokenType.BIT_OR) {
-    const op = advance(parser).value;
+    const op = advance(parser);
     const right = parseBitXor(parser);
-    expr = createBinaryExpr(op, expr, right);
+    expr = createBinaryExpr(op.value, expr, right, mergeSpans(expr.span, right.span));
   }
 
   return expr;
@@ -248,9 +304,9 @@ function parseBitXor(parser: Parser): Expr {
   let expr = parseBitAnd(parser);
 
   while (current(parser).type === TokenType.BIT_XOR) {
-    const op = advance(parser).value;
+    const op = advance(parser);
     const right = parseBitAnd(parser);
-    expr = createBinaryExpr(op, expr, right);
+    expr = createBinaryExpr(op.value, expr, right, mergeSpans(expr.span, right.span));
   }
 
   return expr;
@@ -260,9 +316,9 @@ function parseBitAnd(parser: Parser): Expr {
   let expr = parseUnary(parser);
 
   while (current(parser).type === TokenType.BIT_AND) {
-    const op = advance(parser).value;
+    const op = advance(parser);
     const right = parseUnary(parser);
-    expr = createBinaryExpr(op, expr, right);
+    expr = createBinaryExpr(op.value, expr, right, mergeSpans(expr.span, right.span));
   }
 
   return expr;
@@ -273,9 +329,9 @@ function parseUnary(parser: Parser): Expr {
     current(parser).type === TokenType.BIT_NOT ||
     current(parser).type === TokenType.KW_NOT
   ) {
-    const op = advance(parser).value;
+    const op = advance(parser);
     const operand = parseUnary(parser);
-    return createUnaryExpr(op, operand);
+    return createUnaryExpr(op.value, operand, mergeSpans(op.span, operand.span));
   }
 
   return parsePrimary(parser);
@@ -283,21 +339,23 @@ function parseUnary(parser: Parser): Expr {
 
 function parsePrimary(parser: Parser): Expr {
   if (current(parser).type === TokenType.IDENTIFIER) {
-    return createIdentifierExpr(advance(parser).value);
+    const token = advance(parser);
+    return createIdentifierExpr(token.value, token.span);
   }
 
   if (current(parser).type === TokenType.NUMBER) {
-    return createNumberExpr(advance(parser).value);
+    const token = advance(parser);
+    return createNumberExpr(token.value, token.span);
   }
 
   if (current(parser).type === TokenType.LPAREN) {
-    advance(parser);
+    const leftParen = advance(parser);
     const expr = parseLogicalOr(parser);
-    expect(parser, TokenType.RPAREN);
-    return expr;
+    const rightParen = expect(parser, TokenType.RPAREN);
+    return withExprSpan(expr, mergeSpans(leftParen.span, rightParen.span));
   }
 
-  raiseParserError(parser, "expected expression");
+  raiseParserError(parser, `expected expression, got ${describeToken(current(parser))}`);
 }
 
 function current(parser: Parser): Token {
@@ -310,6 +368,10 @@ function peek(parser: Parser): Token {
   }
 
   return parser.tokens[parser.index + 1];
+}
+
+function previous(parser: Parser): Token {
+  return parser.tokens[Math.max(0, parser.index - 1)];
 }
 
 function advance(parser: Parser): Token {
@@ -328,7 +390,7 @@ function expect(parser: Parser, ...expected: Token["type"][]): Token {
   if (!expected.includes(token.type)) {
     raiseParserError(
       parser,
-      `expected one of [${expected.join(", ")}] got ${token.type}`,
+      `expected ${expected.join(" or ")}, got ${describeToken(token)}`,
     );
   }
 
@@ -338,45 +400,72 @@ function expect(parser: Parser, ...expected: Token["type"][]): Token {
 
 function raiseParserError(parser: Parser, message: string): never {
   const token = current(parser);
-  const error = createParserError(message, token.fileName, token.line, token.column);
+  const prevToken = parser.index > 0 ? parser.tokens[parser.index - 1] : null;
+  const notes = [
+    `token: ${describeToken(token)}`,
+  ];
+
+  if (prevToken) {
+    notes.push(`after: ${describeToken(prevToken)}`);
+  }
+
+  const error = createParserError(message, token.fileName, token.line, token.column, notes);
   throw new Error(formatCompilerError(error));
 }
 
-function logDebug(parser: Parser, label: string, value: unknown): void {
-  if (!parser.debug) {
-    return;
+function describeToken(token: Token): string {
+  if (token.type === TokenType.EOF) {
+    return "EOF";
   }
 
-  console.log(label, value);
+  return `${token.type}('${token.value}')`;
 }
 
-function createIdentifierExpr(name: string): IdentifierExpr {
+function mergeSpans(start: SourceSpan, end: SourceSpan): SourceSpan {
+  return {
+    start: start.start,
+    end: end.end,
+  };
+}
+
+function createIdentifierExpr(name: string, span: SourceSpan): IdentifierExpr {
   return {
     kind: "IdentifierExpr",
     name,
+    span,
   };
 }
 
-function createNumberExpr(value: string): NumberExpr {
+function createNumberExpr(value: string, span: SourceSpan): NumberExpr {
   return {
     kind: "NumberExpr",
     value,
+    span,
   };
 }
 
-function createUnaryExpr(op: string, operand: Expr): UnaryExpr {
+function createUnaryExpr(op: string, operand: Expr, span: SourceSpan): UnaryExpr {
   return {
     kind: "UnaryExpr",
     op,
     operand,
+    span,
   };
 }
 
-function createBinaryExpr(op: string, left: Expr, right: Expr): BinaryExpr {
+function createBinaryExpr(op: string, left: Expr, right: Expr, span: SourceSpan): BinaryExpr {
   return {
     kind: "BinaryExpr",
     op,
     left,
     right,
+    span,
+  };
+}
+
+function withExprSpan(expr: Expr, span: SourceSpan): Expr {
+  return {
+    ...expr,
+    span,
   };
 }
